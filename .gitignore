@@ -1,0 +1,7 @@
+*.pt
+*.mp4
+*.webm
+__pycache__/
+ckpts/
+data/
+
