@@ -383,11 +383,11 @@ class CLIP4Clip(CLIP4ClipPreTrainedModel):
             visual_output = visual_output.permute(1, 0, 2)  # LND -> NLD
             visual_output = visual_output + visual_output_original
 
-        if self.training:
-            visual_output = allgather(visual_output, self.task_config)
-            video_mask = allgather(video_mask, self.task_config)
-            sequence_output = allgather(sequence_output, self.task_config)
-            torch.distributed.barrier()
+        # if self.training:
+        #     visual_output = allgather(visual_output, self.task_config)
+        #     video_mask = allgather(video_mask, self.task_config)
+        #     sequence_output = allgather(sequence_output, self.task_config)
+        #     torch.distributed.barrier()
 
         visual_output = visual_output / visual_output.norm(dim=-1, keepdim=True)
         visual_output = self._mean_pooling_for_similarity_visual(visual_output, video_mask)
