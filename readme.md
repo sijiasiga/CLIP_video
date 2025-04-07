@@ -10,5 +10,5 @@ We adapted the original version to support single-GPU training and evaluation fo
    
 ## Demo Notebook:
 We provide an interactive notebook:
-**CLIP_video.ipynb**
+**CLIP_video.ipynb** <br>
 This notebook demonstrates the full workflow — from loading MSRVTT features to training and evaluation — using a subset of 9k video-text pairs for quick testing.
