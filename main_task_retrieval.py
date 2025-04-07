@@ -14,6 +14,8 @@ from modules.tokenization_clip import SimpleTokenizer as ClipTokenizer
 from modules.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
 from modules.modeling import CLIP4Clip
 from modules.optimization import BertAdam
+from tqdm import tqdm
+
 
 from util import parallel_apply, get_logger
 from dataloaders.data_dataloaders import DATALOADER_DICT
@@ -293,7 +295,12 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
     start_time = time.time()
     total_loss = 0
 
-    for step, batch in enumerate(train_dataloader):
+    # for step, batch in enumerate(train_dataloader):  --DELETE--
+    
+    # ADD progress bar
+    progress_bar = tqdm(enumerate(train_dataloader), total=len(train_dataloader), desc=f"Epoch {epoch+1}")
+    for step, batch in progress_bar:
+
         if n_gpu == 1:
             # multi-gpu does scattering it-self
             batch = tuple(t.to(device=device, non_blocking=True) for t in batch)
@@ -326,6 +333,9 @@ def train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer, 
                 torch.clamp_(model.clip.logit_scale.data, max=np.log(100))
 
             global_step += 1
+
+            progress_bar.set_postfix(loss=round(loss.item(), 4))
+            
             # if global_step % log_step == 0 and local_rank == 0:  --DELETE--
             if global_step % log_step == 0:
                 logger.info("Epoch: %d/%s, Step: %d/%d, Lr: %s, Loss: %f, Time/step: %f", epoch + 1,
