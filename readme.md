@@ -1,2 +1,2 @@
 # CLIP_video 
-## (based on CLIP and CLIP4CLIP)
+## (based on CLIP4CLIP)
