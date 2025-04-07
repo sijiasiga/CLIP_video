@@ -403,7 +403,9 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
         # ----------------------------
         # 1. cache the features
         # ----------------------------
-        for bid, batch in enumerate(test_dataloader):
+        progress_bar = tqdm(enumerate(test_dataloader), total=len(test_dataloader), desc="Evaluating")  # --ADD--
+        
+        for bid, batch in progress_bar:
             batch = tuple(t.to(device) for t in batch)
             input_ids, input_mask, segment_ids, video, video_mask = batch
 
