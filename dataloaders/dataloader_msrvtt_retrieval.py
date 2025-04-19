@@ -12,6 +12,7 @@ import json
 import random
 from dataloaders.rawvideo_util import RawVideoExtractor
 import torch
+from scipy import signal
 
 class MSRVTT_DataLoader(Dataset):
     """MSRVTT dataset loader."""
@@ -198,6 +199,152 @@ class MSRVTT_DataLoader(Dataset):
         
         return raw_video_slice[selected_indices]
     
+    def enhanced_uniform_sampling(self, raw_video_slice, max_frames):
+        """Enhanced Uniform Sampling - combines uniform sampling with key frames
+        
+        1. Samples most frames uniformly for global coverage
+        2. Dedicates some frames to the beginning/end (important context)
+        3. Ensures no frames are duplicated
+        """
+        if len(raw_video_slice) <= max_frames:
+            return raw_video_slice
+            
+        # Calculate how many frames to allocate for each approach
+        uniform_frames = int(max_frames * 0.8)  # 80% uniform
+        special_frames = max_frames - uniform_frames  # 20% special
+        
+        # Get uniform frames
+        uniform_indices = np.linspace(0, raw_video_slice.shape[0] - 1, num=uniform_frames, dtype=int)
+        
+        # Get special frames from beginning and end (these are often important for context)
+        begin_frames = special_frames // 2
+        end_frames = special_frames - begin_frames
+        
+        special_indices = np.concatenate([
+            np.arange(min(begin_frames, raw_video_slice.shape[0] // 10)),  # First 10% or fewer
+            np.arange(max(0, raw_video_slice.shape[0] - end_frames), raw_video_slice.shape[0])  # Last few frames
+        ])
+        
+        # Combine indices and remove duplicates
+        all_indices = np.concatenate([uniform_indices, special_indices])
+        all_indices = np.sort(np.unique(all_indices))[:max_frames]
+        
+        return raw_video_slice[all_indices]
+    
+    def improved_sparse_dense_sampling(self, raw_video_slice, max_frames):
+        """Improved Sparse+Dense Sampling - better implementation of X-CLIP style sampling
+        
+        1. Uses sparse sampling across entire video for global context
+        2. Uses multiple dense sampling clusters focused on high-activity regions
+        3. Balances coverage and detail based on video length
+        """
+        if len(raw_video_slice) <= max_frames:
+            return raw_video_slice
+            
+        video_length = raw_video_slice.shape[0]
+        
+        # Adaptive allocation of frames based on video length
+        if video_length > max_frames * 3:
+            # For long videos: 40% sparse, 60% dense
+            n_sparse = max(max_frames * 4 // 10, 1)
+        else:
+            # For shorter videos: 60% sparse, 40% dense
+            n_sparse = max(max_frames * 6 // 10, 1)
+            
+        n_dense = max_frames - n_sparse
+        
+        # Get sparse frames evenly distributed for global context
+        sparse_indices = np.linspace(0, video_length - 1, num=n_sparse, dtype=int)
+        sparse_frames = raw_video_slice[sparse_indices]
+        
+        # If the video is very short, fall back to uniform sampling
+        if video_length <= n_sparse * 2:
+            return raw_video_slice[sparse_indices]
+            
+        # Calculate frame differences to identify high-activity regions
+        frame_diffs = []
+        for i in range(1, video_length):
+            # Calculate mean absolute difference between consecutive frames
+            if isinstance(raw_video_slice, torch.Tensor):
+                diff = torch.mean(torch.abs(
+                    raw_video_slice[i, 0, 0].float() - raw_video_slice[i-1, 0, 0].float()
+                )).item()
+            else:
+                diff = np.mean(np.abs(
+                    raw_video_slice[i, 0, 0].astype(float) - raw_video_slice[i-1, 0, 0].astype(float)
+                ))
+            frame_diffs.append(diff)
+            
+        frame_diffs = np.array(frame_diffs)
+        
+        # Find peaks in frame differences (high activity regions)
+        if len(frame_diffs) > 5:  # Need enough frames to find peaks
+            # Identify peaks (high motion areas)
+            peaks, _ = signal.find_peaks(frame_diffs, distance=max(3, video_length // 20))
+            
+            # If no clear peaks found, use middle section
+            if len(peaks) == 0:
+                # Fallback to middle-focused sampling
+                mid_point = video_length // 2
+                start_idx = max(0, mid_point - n_dense // 2)
+                end_idx = min(video_length, start_idx + n_dense)
+                dense_indices = np.linspace(start_idx, end_idx - 1, num=n_dense, dtype=int)
+            else:
+                # Rank peaks by magnitude
+                peak_values = frame_diffs[peaks]
+                sorted_peak_indices = np.argsort(-peak_values)  # Descending order
+                
+                # Select top clusters
+                n_clusters = min(3, len(peaks))
+                selected_peaks = [peaks[sorted_peak_indices[i]] for i in range(n_clusters)]
+                
+                # Get dense samples around these peaks
+                dense_indices = []
+                frames_per_cluster = n_dense // n_clusters
+                
+                for peak in selected_peaks:
+                    # Define a window around the peak
+                    half_window = max(2, video_length // 20)
+                    start = max(0, peak - half_window)
+                    end = min(video_length - 1, peak + half_window)
+                    
+                    # Sample frames within this window
+                    if end - start > frames_per_cluster:
+                        cluster_indices = np.linspace(start, end, num=frames_per_cluster, dtype=int)
+                    else:
+                        # If window is too small, take all frames
+                        cluster_indices = np.arange(start, end + 1)
+                    
+                    dense_indices.extend(cluster_indices)
+                    
+                # If we didn't get enough dense frames, add some from highest activity regions
+                while len(dense_indices) < n_dense and len(frame_diffs) > 0:
+                    # Find the highest activity frame that's not already included
+                    candidate_indices = np.argsort(-frame_diffs)
+                    for idx in candidate_indices:
+                        if idx not in dense_indices and idx + 1 not in dense_indices:
+                            dense_indices.append(idx + 1)  # +1 because diffs are between frames i-1 and i
+                            break
+                    if len(dense_indices) < n_dense:
+                        # If we still need frames, break the loop to avoid infinite looping
+                        break
+                
+                # Ensure we don't exceed n_dense
+                dense_indices = dense_indices[:n_dense]
+        else:
+            # For very short videos with few frame differences
+            mid_point = video_length // 2
+            start_idx = max(0, mid_point - n_dense // 2)
+            end_idx = min(video_length, start_idx + n_dense)
+            dense_indices = np.linspace(start_idx, end_idx - 1, num=n_dense, dtype=int)
+        
+        # Combine sparse and dense frames
+        dense_indices = np.array(dense_indices, dtype=int)
+        all_indices = np.concatenate([sparse_indices, dense_indices])
+        all_indices = np.sort(np.unique(all_indices))[:max_frames]
+        
+        return raw_video_slice[all_indices]
+    
     def __init__(
             self,
             csv_path,
@@ -221,9 +368,9 @@ class MSRVTT_DataLoader(Dataset):
         assert self.frame_order in [0, 1, 2]
         # 0: cut from head frames; 1: cut from tail frames; 2: extract frames uniformly; 
         # 3: sparse+dense selection; 4: motion-guided adaptive sampling; 5: scene-change based sampling;
-        # 6: diversity-based keyframe selection
+        # 6: diversity-based keyframe selection; 7: improved sparse+dense; 8: enhanced uniform
         self.slice_framepos = slice_framepos
-        assert self.slice_framepos in [0, 1, 2, 3, 4, 5, 6]
+        assert self.slice_framepos in [0, 1, 2, 3, 4, 5, 6, 7, 8]
 
         self.rawVideoExtractor = RawVideoExtractor(framerate=feature_framerate, size=image_resolution)
         self.SPECIAL_TOKEN = {"CLS_TOKEN": "<|startoftext|>", "SEP_TOKEN": "<|endoftext|>",
@@ -336,6 +483,12 @@ class MSRVTT_DataLoader(Dataset):
                     elif self.slice_framepos == 6:
                         # Diversity-Based Keyframe Selection
                         video_slice = self.diversity_based_keyframe_selection(raw_video_slice, self.max_frames)
+                    elif self.slice_framepos == 7:
+                        # Improved Sparse+Dense Sampling
+                        video_slice = self.improved_sparse_dense_sampling(raw_video_slice, self.max_frames)
+                    elif self.slice_framepos == 8:
+                        # Enhanced Uniform Sampling
+                        video_slice = self.enhanced_uniform_sampling(raw_video_slice, self.max_frames)
                 else:
                     video_slice = raw_video_slice
 
@@ -548,6 +701,152 @@ class MSRVTT_TrainDataLoader(Dataset):
             
         return raw_video_slice[all_indices]
     
+    def enhanced_uniform_sampling(self, raw_video_slice, max_frames):
+        """Enhanced Uniform Sampling - combines uniform sampling with key frames
+        
+        1. Samples most frames uniformly for global coverage
+        2. Dedicates some frames to the beginning/end (important context)
+        3. Ensures no frames are duplicated
+        """
+        if len(raw_video_slice) <= max_frames:
+            return raw_video_slice
+            
+        # Calculate how many frames to allocate for each approach
+        uniform_frames = int(max_frames * 0.8)  # 80% uniform
+        special_frames = max_frames - uniform_frames  # 20% special
+        
+        # Get uniform frames
+        uniform_indices = np.linspace(0, raw_video_slice.shape[0] - 1, num=uniform_frames, dtype=int)
+        
+        # Get special frames from beginning and end (these are often important for context)
+        begin_frames = special_frames // 2
+        end_frames = special_frames - begin_frames
+        
+        special_indices = np.concatenate([
+            np.arange(min(begin_frames, raw_video_slice.shape[0] // 10)),  # First 10% or fewer
+            np.arange(max(0, raw_video_slice.shape[0] - end_frames), raw_video_slice.shape[0])  # Last few frames
+        ])
+        
+        # Combine indices and remove duplicates
+        all_indices = np.concatenate([uniform_indices, special_indices])
+        all_indices = np.sort(np.unique(all_indices))[:max_frames]
+        
+        return raw_video_slice[all_indices]
+    
+    def improved_sparse_dense_sampling(self, raw_video_slice, max_frames):
+        """Improved Sparse+Dense Sampling - better implementation of X-CLIP style sampling
+        
+        1. Uses sparse sampling across entire video for global context
+        2. Uses multiple dense sampling clusters focused on high-activity regions
+        3. Balances coverage and detail based on video length
+        """
+        if len(raw_video_slice) <= max_frames:
+            return raw_video_slice
+            
+        video_length = raw_video_slice.shape[0]
+        
+        # Adaptive allocation of frames based on video length
+        if video_length > max_frames * 3:
+            # For long videos: 40% sparse, 60% dense
+            n_sparse = max(max_frames * 4 // 10, 1)
+        else:
+            # For shorter videos: 60% sparse, 40% dense
+            n_sparse = max(max_frames * 6 // 10, 1)
+            
+        n_dense = max_frames - n_sparse
+        
+        # Get sparse frames evenly distributed for global context
+        sparse_indices = np.linspace(0, video_length - 1, num=n_sparse, dtype=int)
+        sparse_frames = raw_video_slice[sparse_indices]
+        
+        # If the video is very short, fall back to uniform sampling
+        if video_length <= n_sparse * 2:
+            return raw_video_slice[sparse_indices]
+            
+        # Calculate frame differences to identify high-activity regions
+        frame_diffs = []
+        for i in range(1, video_length):
+            # Calculate mean absolute difference between consecutive frames
+            if isinstance(raw_video_slice, torch.Tensor):
+                diff = torch.mean(torch.abs(
+                    raw_video_slice[i, 0, 0].float() - raw_video_slice[i-1, 0, 0].float()
+                )).item()
+            else:
+                diff = np.mean(np.abs(
+                    raw_video_slice[i, 0, 0].astype(float) - raw_video_slice[i-1, 0, 0].astype(float)
+                ))
+            frame_diffs.append(diff)
+            
+        frame_diffs = np.array(frame_diffs)
+        
+        # Find peaks in frame differences (high activity regions)
+        if len(frame_diffs) > 5:  # Need enough frames to find peaks
+            # Identify peaks (high motion areas)
+            peaks, _ = signal.find_peaks(frame_diffs, distance=max(3, video_length // 20))
+            
+            # If no clear peaks found, use middle section
+            if len(peaks) == 0:
+                # Fallback to middle-focused sampling
+                mid_point = video_length // 2
+                start_idx = max(0, mid_point - n_dense // 2)
+                end_idx = min(video_length, start_idx + n_dense)
+                dense_indices = np.linspace(start_idx, end_idx - 1, num=n_dense, dtype=int)
+            else:
+                # Rank peaks by magnitude
+                peak_values = frame_diffs[peaks]
+                sorted_peak_indices = np.argsort(-peak_values)  # Descending order
+                
+                # Select top clusters
+                n_clusters = min(3, len(peaks))
+                selected_peaks = [peaks[sorted_peak_indices[i]] for i in range(n_clusters)]
+                
+                # Get dense samples around these peaks
+                dense_indices = []
+                frames_per_cluster = n_dense // n_clusters
+                
+                for peak in selected_peaks:
+                    # Define a window around the peak
+                    half_window = max(2, video_length // 20)
+                    start = max(0, peak - half_window)
+                    end = min(video_length - 1, peak + half_window)
+                    
+                    # Sample frames within this window
+                    if end - start > frames_per_cluster:
+                        cluster_indices = np.linspace(start, end, num=frames_per_cluster, dtype=int)
+                    else:
+                        # If window is too small, take all frames
+                        cluster_indices = np.arange(start, end + 1)
+                    
+                    dense_indices.extend(cluster_indices)
+                    
+                # If we didn't get enough dense frames, add some from highest activity regions
+                while len(dense_indices) < n_dense and len(frame_diffs) > 0:
+                    # Find the highest activity frame that's not already included
+                    candidate_indices = np.argsort(-frame_diffs)
+                    for idx in candidate_indices:
+                        if idx not in dense_indices and idx + 1 not in dense_indices:
+                            dense_indices.append(idx + 1)  # +1 because diffs are between frames i-1 and i
+                            break
+                    if len(dense_indices) < n_dense:
+                        # If we still need frames, break the loop to avoid infinite looping
+                        break
+                
+                # Ensure we don't exceed n_dense
+                dense_indices = dense_indices[:n_dense]
+        else:
+            # For very short videos with few frame differences
+            mid_point = video_length // 2
+            start_idx = max(0, mid_point - n_dense // 2)
+            end_idx = min(video_length, start_idx + n_dense)
+            dense_indices = np.linspace(start_idx, end_idx - 1, num=n_dense, dtype=int)
+        
+        # Combine sparse and dense frames
+        dense_indices = np.array(dense_indices, dtype=int)
+        all_indices = np.concatenate([sparse_indices, dense_indices])
+        all_indices = np.sort(np.unique(all_indices))[:max_frames]
+        
+        return raw_video_slice[all_indices]
+    
     def __init__(
             self,
             csv_path,
@@ -574,9 +873,9 @@ class MSRVTT_TrainDataLoader(Dataset):
         assert self.frame_order in [0, 1, 2]
         # 0: cut from head frames; 1: cut from tail frames; 2: extract frames uniformly; 
         # 3: sparse+dense selection; 4: motion-guided adaptive sampling; 5: scene-change based sampling;
-        # 6: diversity-based keyframe selection
+        # 6: diversity-based keyframe selection; 7: improved sparse+dense; 8: enhanced uniform
         self.slice_framepos = slice_framepos
-        assert self.slice_framepos in [0, 1, 2, 3, 4, 5, 6]
+        assert self.slice_framepos in [0, 1, 2, 3, 4, 5, 6, 7, 8]
 
         self.unfold_sentences = unfold_sentences
         self.sample_len = 0
@@ -724,6 +1023,12 @@ class MSRVTT_TrainDataLoader(Dataset):
                     elif self.slice_framepos == 6:
                         # Diversity-Based Keyframe Selection
                         video_slice = self.diversity_based_keyframe_selection(raw_video_slice, self.max_frames)
+                    elif self.slice_framepos == 7:
+                        # Improved Sparse+Dense Sampling
+                        video_slice = self.improved_sparse_dense_sampling(raw_video_slice, self.max_frames)
+                    elif self.slice_framepos == 8:
+                        # Enhanced Uniform Sampling
+                        video_slice = self.enhanced_uniform_sampling(raw_video_slice, self.max_frames)
                 else:
                     video_slice = raw_video_slice
 
