@@ -345,6 +345,177 @@ class MSRVTT_DataLoader(Dataset):
         
         return raw_video_slice[all_indices]
     
+    def advanced_hybrid_sampling(self, raw_video_slice, max_frames):
+        """Advanced Hybrid Sampling - combines intelligent sparse and focused dense sampling
+        
+        1. Separates sparse global frames and dense local frames
+        2. Applies strategic weighting to prioritize informative frames
+        3. Uses activity-based analysis to identify important segments
+        """
+        if len(raw_video_slice) <= max_frames:
+            return raw_video_slice
+            
+        video_length = raw_video_slice.shape[0]
+        
+        # Use roughly half for sparse, half for dense
+        n_sparse = max_frames // 2
+        n_dense = max_frames - n_sparse
+        
+        # --- PART 1: Intelligent sparse frame selection ---
+        # Calculate importance of each frame using temporal gradients
+        if isinstance(raw_video_slice, torch.Tensor):
+            raw_video_np = raw_video_slice.cpu().numpy()
+        else:
+            raw_video_np = raw_video_slice
+        
+        # Compute frame importance scores based on temporal differences
+        frame_diffs = np.zeros(video_length)
+        
+        # Forward differences
+        for i in range(1, video_length):
+            diff = np.mean(np.abs(
+                raw_video_np[i, 0, 0].astype(float) - raw_video_np[i-1, 0, 0].astype(float)
+            ))
+            frame_diffs[i-1] += diff
+            frame_diffs[i] += diff
+        
+        # Normalize importance scores
+        if np.max(frame_diffs) > 0:
+            importance = frame_diffs / np.max(frame_diffs)
+        else:
+            importance = np.ones(video_length) / video_length
+        
+        # Combine uniform sampling and importance-based sampling
+        # 70% uniform, 30% importance-weighted for sparse frames
+        uniform_sparse = int(n_sparse * 0.7)
+        weighted_sparse = n_sparse - uniform_sparse
+        
+        # Get uniformly sampled frames for coverage
+        uniform_indices = np.linspace(0, video_length - 1, num=uniform_sparse, dtype=int)
+        
+        # Get importance-weighted frames
+        # Create a probability distribution based on importance
+        if weighted_sparse > 0:
+            # Avoid selecting frames too close to uniform indices
+            mask = np.ones(video_length, dtype=bool)
+            for idx in uniform_indices:
+                window = 3  # Avoid frames within this window
+                low = max(0, idx - window)
+                high = min(video_length, idx + window + 1)
+                mask[low:high] = False
+            
+            # If we've masked too much, fall back to uniform
+            if np.sum(mask) < weighted_sparse:
+                remaining_indices = np.linspace(0, video_length - 1, num=weighted_sparse, dtype=int)
+            else:
+                # Select based on importance, but avoid already selected frames
+                masked_importance = importance.copy()
+                masked_importance[~mask] = 0
+                
+                # Normalize to create a probability distribution
+                if np.sum(masked_importance) > 0:
+                    probs = masked_importance / np.sum(masked_importance)
+                    remaining_indices = np.random.choice(
+                        np.arange(video_length),
+                        size=weighted_sparse,
+                        replace=False,
+                        p=probs
+                    )
+                else:
+                    # Fallback if all important frames were masked
+                    remaining_indices = np.linspace(0, video_length - 1, num=weighted_sparse, dtype=int)
+        else:
+            remaining_indices = np.array([], dtype=int)
+        
+        # Combine uniform and importance-weighted sparse indices
+        sparse_indices = np.concatenate([uniform_indices, remaining_indices])
+        sparse_indices = np.sort(np.unique(sparse_indices))
+        
+        # --- PART 2: Multi-scale dense frame selection ---
+        # Focus dense frames on regions with high activity
+        
+        # Find high-activity regions
+        activity_scores = np.zeros(video_length)
+        window_size = max(5, video_length // 20)  # Adaptive window
+        
+        # Compute activity over windows
+        for i in range(video_length):
+            start = max(0, i - window_size // 2)
+            end = min(video_length, i + window_size // 2 + 1)
+            activity_scores[i] = np.mean(frame_diffs[start:end])
+        
+        # Find the highest activity region center
+        if np.sum(activity_scores) > 0:
+            center_idx = np.argmax(activity_scores)
+        else:
+            # Fallback to middle if no clear activity peak
+            center_idx = video_length // 2
+        
+        # Calculate start and end of dense region with adaptive sizing
+        # Longer videos get relatively smaller dense regions
+        region_size_factor = max(0.3, min(0.6, 30 / video_length))
+        region_radius = int(video_length * region_size_factor / 2)
+        
+        dense_start = max(0, center_idx - region_radius)
+        dense_end = min(video_length, center_idx + region_radius)
+        
+        # Get dense frames with slightly higher sampling rate near the center
+        if dense_end - dense_start > n_dense:
+            # Create non-uniform sampling that's denser near the center
+            center_weight = np.ones(dense_end - dense_start)
+            center_pos = center_idx - dense_start
+            
+            # Apply Gaussian-like weighting centered at the activity peak
+            for i in range(len(center_weight)):
+                dist = abs(i - center_pos) / (dense_end - dense_start)
+                center_weight[i] = np.exp(-5 * dist)
+            
+            # Normalize to create a probability distribution
+            center_weight = center_weight / np.sum(center_weight)
+            
+            # Sample dense frames with this non-uniform distribution
+            dense_local_indices = np.random.choice(
+                np.arange(dense_start, dense_end),
+                size=n_dense,
+                replace=False,
+                p=center_weight
+            )
+            dense_indices = np.sort(dense_local_indices)
+        else:
+            # If region is smaller than needed frames, take all and pad uniformly
+            dense_indices = np.arange(dense_start, dense_end)
+            
+            # Add uniformly sampled frames outside the dense region if needed
+            if len(dense_indices) < n_dense:
+                remaining = n_dense - len(dense_indices)
+                
+                # Create mask to exclude already selected frames
+                mask = np.ones(video_length, dtype=bool)
+                mask[dense_start:dense_end] = False
+                for idx in sparse_indices:
+                    if idx < video_length:
+                        mask[idx] = False
+                
+                # Get remaining indices
+                valid_indices = np.where(mask)[0]
+                if len(valid_indices) >= remaining:
+                    extra_indices = np.random.choice(valid_indices, size=remaining, replace=False)
+                    dense_indices = np.concatenate([dense_indices, extra_indices])
+                else:
+                    # If not enough unique frames left, allow some duplicates
+                    # (though this should rarely happen)
+                    extra_indices = np.linspace(0, video_length - 1, num=remaining, dtype=int)
+                    dense_indices = np.concatenate([dense_indices, extra_indices])
+                
+                dense_indices = np.sort(np.unique(dense_indices))[:n_dense]
+        
+        # --- PART 3: Combine sparse and dense frames ---
+        all_indices = np.concatenate([sparse_indices, dense_indices])
+        all_indices = np.sort(np.unique(all_indices))[:max_frames]
+        
+        # Return the selected frames
+        return raw_video_slice[all_indices]
+    
     def __init__(
             self,
             csv_path,
@@ -366,11 +537,20 @@ class MSRVTT_DataLoader(Dataset):
         # 0: ordinary order; 1: reverse order; 2: random order.
         self.frame_order = frame_order
         assert self.frame_order in [0, 1, 2]
-        # 0: cut from head frames; 1: cut from tail frames; 2: extract frames uniformly; 
-        # 3: sparse+dense selection; 4: motion-guided adaptive sampling; 5: scene-change based sampling;
-        # 6: diversity-based keyframe selection; 7: improved sparse+dense; 8: enhanced uniform
+        
+        # Frame selection methods:
+        # slice_framepos = 0: Head frames (cut from beginning of video)
+        # slice_framepos = 1: Tail frames (cut from end of video)
+        # slice_framepos = 2: Uniform frames (evenly distributed)
+        # slice_framepos = 3: Sparse+dense frames (half uniform, half from middle)
+        # slice_framepos = 4: Motion-guided adaptive sampling (based on movement)
+        # slice_framepos = 5: Scene-change based sampling (based on visual transitions)
+        # slice_framepos = 6: Diversity-based keyframe selection (maximal visual diversity)
+        # slice_framepos = 7: Improved sparse+dense sampling (activity-aware)
+        # slice_framepos = 8: Enhanced uniform sampling (uniform + key frames)
+        # slice_framepos = 9: Advanced hybrid sampling (intelligent sparse + focused dense)
         self.slice_framepos = slice_framepos
-        assert self.slice_framepos in [0, 1, 2, 3, 4, 5, 6, 7, 8]
+        assert self.slice_framepos in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
         self.rawVideoExtractor = RawVideoExtractor(framerate=feature_framerate, size=image_resolution)
         self.SPECIAL_TOKEN = {"CLS_TOKEN": "<|startoftext|>", "SEP_TOKEN": "<|endoftext|>",
@@ -489,6 +669,9 @@ class MSRVTT_DataLoader(Dataset):
                     elif self.slice_framepos == 8:
                         # Enhanced Uniform Sampling
                         video_slice = self.enhanced_uniform_sampling(raw_video_slice, self.max_frames)
+                    elif self.slice_framepos == 9:
+                        # Advanced Hybrid Sampling
+                        video_slice = self.advanced_hybrid_sampling(raw_video_slice, self.max_frames)
                 else:
                     video_slice = raw_video_slice
 
@@ -847,6 +1030,177 @@ class MSRVTT_TrainDataLoader(Dataset):
         
         return raw_video_slice[all_indices]
     
+    def advanced_hybrid_sampling(self, raw_video_slice, max_frames):
+        """Advanced Hybrid Sampling - combines intelligent sparse and focused dense sampling
+        
+        1. Separates sparse global frames and dense local frames
+        2. Applies strategic weighting to prioritize informative frames
+        3. Uses activity-based analysis to identify important segments
+        """
+        if len(raw_video_slice) <= max_frames:
+            return raw_video_slice
+            
+        video_length = raw_video_slice.shape[0]
+        
+        # Use roughly half for sparse, half for dense
+        n_sparse = max_frames // 2
+        n_dense = max_frames - n_sparse
+        
+        # --- PART 1: Intelligent sparse frame selection ---
+        # Calculate importance of each frame using temporal gradients
+        if isinstance(raw_video_slice, torch.Tensor):
+            raw_video_np = raw_video_slice.cpu().numpy()
+        else:
+            raw_video_np = raw_video_slice
+        
+        # Compute frame importance scores based on temporal differences
+        frame_diffs = np.zeros(video_length)
+        
+        # Forward differences
+        for i in range(1, video_length):
+            diff = np.mean(np.abs(
+                raw_video_np[i, 0, 0].astype(float) - raw_video_np[i-1, 0, 0].astype(float)
+            ))
+            frame_diffs[i-1] += diff
+            frame_diffs[i] += diff
+        
+        # Normalize importance scores
+        if np.max(frame_diffs) > 0:
+            importance = frame_diffs / np.max(frame_diffs)
+        else:
+            importance = np.ones(video_length) / video_length
+        
+        # Combine uniform sampling and importance-based sampling
+        # 70% uniform, 30% importance-weighted for sparse frames
+        uniform_sparse = int(n_sparse * 0.7)
+        weighted_sparse = n_sparse - uniform_sparse
+        
+        # Get uniformly sampled frames for coverage
+        uniform_indices = np.linspace(0, video_length - 1, num=uniform_sparse, dtype=int)
+        
+        # Get importance-weighted frames
+        # Create a probability distribution based on importance
+        if weighted_sparse > 0:
+            # Avoid selecting frames too close to uniform indices
+            mask = np.ones(video_length, dtype=bool)
+            for idx in uniform_indices:
+                window = 3  # Avoid frames within this window
+                low = max(0, idx - window)
+                high = min(video_length, idx + window + 1)
+                mask[low:high] = False
+            
+            # If we've masked too much, fall back to uniform
+            if np.sum(mask) < weighted_sparse:
+                remaining_indices = np.linspace(0, video_length - 1, num=weighted_sparse, dtype=int)
+            else:
+                # Select based on importance, but avoid already selected frames
+                masked_importance = importance.copy()
+                masked_importance[~mask] = 0
+                
+                # Normalize to create a probability distribution
+                if np.sum(masked_importance) > 0:
+                    probs = masked_importance / np.sum(masked_importance)
+                    remaining_indices = np.random.choice(
+                        np.arange(video_length),
+                        size=weighted_sparse,
+                        replace=False,
+                        p=probs
+                    )
+                else:
+                    # Fallback if all important frames were masked
+                    remaining_indices = np.linspace(0, video_length - 1, num=weighted_sparse, dtype=int)
+        else:
+            remaining_indices = np.array([], dtype=int)
+        
+        # Combine uniform and importance-weighted sparse indices
+        sparse_indices = np.concatenate([uniform_indices, remaining_indices])
+        sparse_indices = np.sort(np.unique(sparse_indices))
+        
+        # --- PART 2: Multi-scale dense frame selection ---
+        # Focus dense frames on regions with high activity
+        
+        # Find high-activity regions
+        activity_scores = np.zeros(video_length)
+        window_size = max(5, video_length // 20)  # Adaptive window
+        
+        # Compute activity over windows
+        for i in range(video_length):
+            start = max(0, i - window_size // 2)
+            end = min(video_length, i + window_size // 2 + 1)
+            activity_scores[i] = np.mean(frame_diffs[start:end])
+        
+        # Find the highest activity region center
+        if np.sum(activity_scores) > 0:
+            center_idx = np.argmax(activity_scores)
+        else:
+            # Fallback to middle if no clear activity peak
+            center_idx = video_length // 2
+        
+        # Calculate start and end of dense region with adaptive sizing
+        # Longer videos get relatively smaller dense regions
+        region_size_factor = max(0.3, min(0.6, 30 / video_length))
+        region_radius = int(video_length * region_size_factor / 2)
+        
+        dense_start = max(0, center_idx - region_radius)
+        dense_end = min(video_length, center_idx + region_radius)
+        
+        # Get dense frames with slightly higher sampling rate near the center
+        if dense_end - dense_start > n_dense:
+            # Create non-uniform sampling that's denser near the center
+            center_weight = np.ones(dense_end - dense_start)
+            center_pos = center_idx - dense_start
+            
+            # Apply Gaussian-like weighting centered at the activity peak
+            for i in range(len(center_weight)):
+                dist = abs(i - center_pos) / (dense_end - dense_start)
+                center_weight[i] = np.exp(-5 * dist)
+            
+            # Normalize to create a probability distribution
+            center_weight = center_weight / np.sum(center_weight)
+            
+            # Sample dense frames with this non-uniform distribution
+            dense_local_indices = np.random.choice(
+                np.arange(dense_start, dense_end),
+                size=n_dense,
+                replace=False,
+                p=center_weight
+            )
+            dense_indices = np.sort(dense_local_indices)
+        else:
+            # If region is smaller than needed frames, take all and pad uniformly
+            dense_indices = np.arange(dense_start, dense_end)
+            
+            # Add uniformly sampled frames outside the dense region if needed
+            if len(dense_indices) < n_dense:
+                remaining = n_dense - len(dense_indices)
+                
+                # Create mask to exclude already selected frames
+                mask = np.ones(video_length, dtype=bool)
+                mask[dense_start:dense_end] = False
+                for idx in sparse_indices:
+                    if idx < video_length:
+                        mask[idx] = False
+                
+                # Get remaining indices
+                valid_indices = np.where(mask)[0]
+                if len(valid_indices) >= remaining:
+                    extra_indices = np.random.choice(valid_indices, size=remaining, replace=False)
+                    dense_indices = np.concatenate([dense_indices, extra_indices])
+                else:
+                    # If not enough unique frames left, allow some duplicates
+                    # (though this should rarely happen)
+                    extra_indices = np.linspace(0, video_length - 1, num=remaining, dtype=int)
+                    dense_indices = np.concatenate([dense_indices, extra_indices])
+                
+                dense_indices = np.sort(np.unique(dense_indices))[:n_dense]
+        
+        # --- PART 3: Combine sparse and dense frames ---
+        all_indices = np.concatenate([sparse_indices, dense_indices])
+        all_indices = np.sort(np.unique(all_indices))[:max_frames]
+        
+        # Return the selected frames
+        return raw_video_slice[all_indices]
+    
     def __init__(
             self,
             csv_path,
@@ -871,11 +1225,20 @@ class MSRVTT_TrainDataLoader(Dataset):
         # 0: ordinary order; 1: reverse order; 2: random order.
         self.frame_order = frame_order
         assert self.frame_order in [0, 1, 2]
-        # 0: cut from head frames; 1: cut from tail frames; 2: extract frames uniformly; 
-        # 3: sparse+dense selection; 4: motion-guided adaptive sampling; 5: scene-change based sampling;
-        # 6: diversity-based keyframe selection; 7: improved sparse+dense; 8: enhanced uniform
+        
+        # Frame selection methods:
+        # slice_framepos = 0: Head frames (cut from beginning of video)
+        # slice_framepos = 1: Tail frames (cut from end of video)
+        # slice_framepos = 2: Uniform frames (evenly distributed)
+        # slice_framepos = 3: Sparse+dense frames (half uniform, half from middle)
+        # slice_framepos = 4: Motion-guided adaptive sampling (based on movement)
+        # slice_framepos = 5: Scene-change based sampling (based on visual transitions)
+        # slice_framepos = 6: Diversity-based keyframe selection (maximal visual diversity)
+        # slice_framepos = 7: Improved sparse+dense sampling (activity-aware)
+        # slice_framepos = 8: Enhanced uniform sampling (uniform + key frames)
+        # slice_framepos = 9: Advanced hybrid sampling (intelligent sparse + focused dense)
         self.slice_framepos = slice_framepos
-        assert self.slice_framepos in [0, 1, 2, 3, 4, 5, 6, 7, 8]
+        assert self.slice_framepos in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
         self.unfold_sentences = unfold_sentences
         self.sample_len = 0
@@ -1029,6 +1392,9 @@ class MSRVTT_TrainDataLoader(Dataset):
                     elif self.slice_framepos == 8:
                         # Enhanced Uniform Sampling
                         video_slice = self.enhanced_uniform_sampling(raw_video_slice, self.max_frames)
+                    elif self.slice_framepos == 9:
+                        # Advanced Hybrid Sampling
+                        video_slice = self.advanced_hybrid_sampling(raw_video_slice, self.max_frames)
                 else:
                     video_slice = raw_video_slice
 

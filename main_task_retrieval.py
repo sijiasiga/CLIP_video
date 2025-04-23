@@ -97,10 +97,18 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
                         help="Frame order, 0: ordinary order; 1: reverse order; 2: random order.")
 
     parser.add_argument('--freeze_layer_num', type=int, default=0, help="Layer NO. of CLIP need to freeze.")
-    parser.add_argument('--slice_framepos', type=int, default=2, choices=[0, 1, 2, 3, 4, 5, 6, 7, 8],
-                        help='0: cut from start frames; 1: cut from end frames; 2: extract frames uniformly; \
-                            3: sparse + dense sampling; 4: motion-guided adaptive sampling; 5: scene-change based sampling; \
-                            6: diversity-based keyframe selection; 7: improved sparse+dense sampling; 8: enhanced uniform sampling')
+    parser.add_argument('--slice_framepos', type=int, default=2, choices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+                        help='Frame selection methods: \
+                            0: Head frames (beginning of video); \
+                            1: Tail frames (end of video); \
+                            2: Uniform frames (evenly distributed); \
+                            3: Sparse+dense frames (half uniform, half from middle); \
+                            4: Motion-guided adaptive sampling (based on movement); \
+                            5: Scene-change based sampling (based on visual transitions); \
+                            6: Diversity-based keyframe selection (maximal visual diversity); \
+                            7: Improved sparse+dense sampling (activity-aware); \
+                            8: Enhanced uniform sampling (uniform + key frames); \
+                            9: Advanced hybrid sampling (intelligent sparse + focused dense)')
     parser.add_argument('--linear_patch', type=str, default="2d", choices=["2d", "3d"],
                         help="linear projection of flattened patches.")
     parser.add_argument('--sim_header', type=str, default="meanP",
