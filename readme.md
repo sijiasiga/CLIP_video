@@ -1,5 +1,5 @@
 # CLIP_video 
-This project is based on CLIP4Clip, a framework for video-text retrieval using CLIP.
+This project is based on CLIP4Clip(https://github.com/ArrowLuo/CLIP4Clip), a framework for video-text retrieval using CLIP.
 We adapted the original version to support single-GPU training and evaluation for more accessible development and experimentation
 
 ## Key Changes:
