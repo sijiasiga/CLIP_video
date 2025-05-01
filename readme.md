@@ -49,4 +49,7 @@ This notebook demonstrates the full workflow — from loading MSRVTT features to
 - To use uniform frame sampling, change `slice_framepos` from `2` to `0`.
 - For other data augmentation options, please refer to the original **CLIP4Clip** implementation and documentation.
 
+### Training Results:
+We put our 20 epochs training results on different combinations of frame sampling methods and similarity calculators in **20ep_combination_training_results** 
+
 
