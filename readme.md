@@ -22,7 +22,7 @@ We provide an interactive notebook:
 **CLIP_video_training.ipynb** <br>
 This notebook demonstrates the full workflow — from loading MSRVTT features to training and evaluation — using a subset of 9k video-text pairs for quick testing.
 
-## Configuration Example
+## Configuration Example:
 
 | Parameter             | Value       | Description (optional)                        |
 |-----------------------|-------------|-----------------------------------------------|
@@ -49,7 +49,7 @@ This notebook demonstrates the full workflow — from loading MSRVTT features to
 - To use uniform frame sampling, change `slice_framepos` from `2` to `0`.
 - For other data augmentation options, please refer to the original **CLIP4Clip** implementation and documentation.
 
-### Training Results:
+## Training Results:
 We put our 20 epochs training results on different combinations of frame sampling methods and similarity calculators in **20ep_combination_training_results** 
 
 
