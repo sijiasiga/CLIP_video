@@ -42,3 +42,11 @@ This notebook demonstrates the full workflow — from loading MSRVTT features to
 | `sim_header`          | seqLSTM     | Type of similarity module used                |
 | `pretrained_clip_name`| ViT-B/32    | Pretrained CLIP model backbone                |
 
+---
+
+### Notes:
+- You can change `--sim_header` to: `meanP`, `maxP`, `seqTransf`, `tightTransf`, or `seqLSTM` depending on the similarity strategy you want to explore.
+- To use uniform frame sampling, change `slice_framepos` from `2` to `0`.
+- For other data augmentation options, please refer to the original **CLIP4Clip** implementation and documentation.
+
+
