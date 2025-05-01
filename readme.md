@@ -22,20 +22,23 @@ We provide an interactive notebook:
 **CLIP_video_training.ipynb** <br>
 This notebook demonstrates the full workflow — from loading MSRVTT features to training and evaluation — using a subset of 9k video-text pairs for quick testing.
 
-## Config(example)
-num_thread_reader: 8 
-epochs: 20 
-batch_size: 64 
-lr: 1e-4 
-max_words: 32 
-max_frames: 8 
-batch_size_val: 8 
-feature_framerate: 1 
-coef_lr: 1e-3 
-freeze_layer_num: 6 
-slice_framepos: 2  
-loose_type 
-linear_patch: 2d 
-sim_header: seqLSTM 
-pretrained_clip_name: ViT-B/32 
+## Configuration Example
+
+| Parameter             | Value       | Description (optional)                        |
+|-----------------------|-------------|-----------------------------------------------|
+| `num_thread_reader`   | 8           | Number of threads for data loading            |
+| `epochs`              | 20          | Total number of training epochs               |
+| `batch_size`          | 64          | Training batch size                           |
+| `lr`                  | 1e-4        | Learning rate for main model parameters       |
+| `max_words`           | 32          | Maximum number of words in a caption          |
+| `max_frames`          | 8           | Maximum number of video frames                |
+| `batch_size_val`      | 8           | Batch size for validation                     |
+| `feature_framerate`   | 1           | Frame sampling rate                           |
+| `coef_lr`             | 1e-3        | Learning rate coefficient for the text encoder|
+| `freeze_layer_num`    | 6           | Number of frozen layers in CLIP backbone      |
+| `slice_framepos`      | 2           | Frame sampling position strategy              |
+| `loose_type`          | (enabled)   | Indicates use of loose similarity matching    |
+| `linear_patch`        | 2d          | Patch type for visual transformer             |
+| `sim_header`          | seqLSTM     | Type of similarity module used                |
+| `pretrained_clip_name`| ViT-B/32    | Pretrained CLIP model backbone                |
 
